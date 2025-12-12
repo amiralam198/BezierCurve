@@ -205,3 +205,9 @@ The implementation is organized into logical sections:
 - support for mobile device gyroscope input (iOS CoreMotion)
 - adjustable physics parameters via UI controls
 - cubic Hermite spline interpolation for smoother motion
+
+## Submission
+
+screen recording  showing interactivity.
+
+link [https://drive.google.com/file/d/1YDPtT06Ryu4sYGt5weX82uXMb1p33f9k/view?usp=drive_link]
