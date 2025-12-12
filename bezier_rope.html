@@ -1,0 +1,374 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Interactive Bézier Rope</title>
+  <style>
+    html,body{height:100%;margin:0;background:#111;color:#ddd;font-family:Arial}
+    canvas{display:block;background:linear-gradient(180deg,#0b1220,#07101a);width:100%;height:100vh;}
+    #info{position:absolute;left:12px;top:12px;background:rgba(0,0,0,0.4);padding:8px 10px;border-radius:6px;font-size:13px}
+    .hint{opacity:0.8;font-size:12px}
+  </style>
+</head>
+<body>
+  <div id="info">
+    <div>Interactive Cubic Bézier Rope — mouse/touch to move target, drag control points</div>
+    <div class="hint">Tangent lines visualized. Physics: spring + damping.</div>
+  </div>
+  <canvas id="c"></canvas>
+
+<script>
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+function vec(x=0,y=0){ return {x,y}; }
+function vAdd(a,b){return {x:a.x+b.x,y:a.y+b.y}}
+function vSub(a,b){return {x:a.x-b.x,y:a.y-b.y}}
+function vScale(a,s){return {x:a.x*s,y:a.y*s}}
+function vLen(a){return Math.hypot(a.x,a.y)}
+function vNorm(a){ const L=vLen(a)||1; return {x:a.x/L,y:a.y/L}}
+
+// canvas
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let canvasWidth = innerWidth;
+let canvasHeight = innerHeight;
+
+// Bazier math
+function bezierPoint(p0,p1,p2,p3,t){
+  const u = 1 - t;
+  const u2 = u * u;
+  const u3 = u2 * u;
+  const t2 = t * t;
+  const t3 = t2 * t;
+  const c0 = u3;
+  const c1 = 3 * u2 * t;
+  const c2 = 3 * u * t2;
+  const c3 = t3;
+  return {
+    x: c0*p0.x + c1*p1.x + c2*p2.x + c3*p3.x,
+    y: c0*p0.y + c1*p1.y + c2*p2.y + c3*p3.y
+  };
+}
+// derivative 
+function bezierTangent(p0,p1,p2,p3,t){
+  const u = 1 - t;
+  const u2 = u * u;
+  const t2 = t * t;
+  const a = vScale(vSub(p1,p0), 3 * u2);
+  const b = vScale(vSub(p2,p1), 6 * u * t);
+  const c = vScale(vSub(p3,p2), 3 * t2);
+  return vAdd(vAdd(a,b),c);
+}
+
+// fixing endpoints
+let p0 = vec(100, 0);
+let p3 = vec(100, 0);
+
+function updateFixedPoints(){
+  if (!p0 || !p3) return; 
+  p0.x = 100;
+  p0.y = canvasHeight * 0.5 - 120;
+  p3.x = canvasWidth - 100;
+  p3.y = canvasHeight * 0.5 - 120;
+}
+
+function resize(){ 
+  canvasWidth = innerWidth;
+  canvasHeight = innerHeight;
+  canvas.width = canvasWidth; 
+  canvas.height = canvasHeight;
+  updateFixedPoints();
+}
+addEventListener('resize',resize);
+resize();
+
+
+// dynamic control points with physics state
+function DynamicPoint(x,y){
+  this.pos = vec(x,y);
+  this.vel = vec(0,0);
+  this.target = vec(x,y);
+  this.mass = 1;
+  this.k = 150;
+  this.damping = 18;
+  this.radius = 8;
+}
+DynamicPoint.prototype.update = function(dt){
+  const spring = vScale(vSub(this.pos, this.target), -this.k);
+  const dampingForce = vScale(this.vel, -this.damping);
+  const accel = vScale(vAdd(spring, dampingForce), 1/this.mass);
+  
+  // semi-implicit Euler integration
+  this.vel.x += accel.x * dt;
+  this.vel.y += accel.y * dt;
+  this.pos.x += this.vel.x * dt;
+  this.pos.y += this.vel.y * dt;
+};
+
+//initializing after canvas is sized
+let p1, p2;
+function initializeControlPoints(){
+  const midY = canvasHeight * 0.5 + 40;
+  const span = p3.x - p0.x;
+  p1 = new DynamicPoint(p0.x + span/3, midY);
+  p2 = new DynamicPoint(p0.x + 2*span/3, midY);
+}
+
+let globalTarget = vec(0, 0);
+let mouseDown = false;
+
+function initializeGlobalTarget(){
+  globalTarget.x = (p0.x + p3.x)/2;
+  globalTarget.y = canvasHeight/2 + 200;
+}
+
+// set targets for p1 and p2 based on globalTarget with offsets
+function updateTargets(){
+  const offsetX = (p3.x - p0.x) * 0.08;
+  p1.target.x = globalTarget.x - offsetX;
+  p2.target.x = globalTarget.x + offsetX;
+  p1.target.y = globalTarget.y;
+  p2.target.y = globalTarget.y + 15;
+}
+
+let dragging = null; // 'p1' | 'p2' or null
+
+function getMousePos(e){
+  const rect = canvas.getBoundingClientRect();
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  const scaleX = canvas.width/rect.width;
+  const scaleY = canvas.height/rect.height;
+  return{
+    x: (clientX - rect.left) * scaleX, 
+    y: (clientY - rect.top) * scaleY
+  };
+}
+
+canvas.addEventListener('mousedown', (e)=>{
+  if (!p1 || !p2) return;
+  const m = getMousePos(e);
+// checking if near control points to drag them directly
+  if(vLen(vSub(m,p1.pos))<20){ 
+    dragging='p1'; 
+    e.preventDefault();
+  }
+  else if(vLen(vSub(m,p2.pos))<20){ 
+    dragging='p2'; 
+    e.preventDefault();
+  }
+  else{ 
+    mouseDown = true; 
+    globalTarget.x = m.x;
+    globalTarget.y = m.y;
+    updateTargets(); 
+  }
+});
+canvas.addEventListener('touchstart', (e)=>{ 
+  e.preventDefault(); 
+  if (!p1 || !p2) return; // safety check
+  if (e.touches.length === 1){
+    const m = getMousePos(e);
+    if (vLen(vSub(m, p1.pos)) < 20){ 
+      dragging='p1';
+   }
+    else if (vLen(vSub(m, p2.pos)) < 20){ 
+      dragging='p2';
+   }
+    else{ 
+      mouseDown = true; 
+      globalTarget.x = m.x;
+      globalTarget.y = m.y;
+      updateTargets(); 
+    }
+  }
+}, {passive:false});
+
+addEventListener('mousemove', (e)=>{
+  if (!p1 || !p2) return;
+  const m = getMousePos(e);
+  if (dragging==='p1'){ 
+    p1.pos.x = m.x;
+    p1.pos.y = m.y;
+    p1.vel.x = 0;
+    p1.vel.y = 0;
+    p1.target.x = m.x;
+    p1.target.y = m.y;
+  }
+  else if (dragging==='p2'){ 
+    p2.pos.x = m.x;
+    p2.pos.y = m.y;
+    p2.vel.x = 0;
+    p2.vel.y = 0;
+    p2.target.x = m.x;
+    p2.target.y = m.y;
+  }
+  else if (mouseDown){ 
+    globalTarget.x = m.x;
+    globalTarget.y = m.y;
+    updateTargets(); 
+  }
+});
+addEventListener('touchmove', (e)=>{ 
+  e.preventDefault(); 
+  if (!p1 || !p2) return;
+  if (e.touches.length === 1) {
+    const m = getMousePos(e);
+    if (dragging==='p1'){ 
+      p1.pos.x = m.x;
+      p1.pos.y = m.y;
+      p1.vel.x = 0;
+      p1.vel.y = 0;
+      p1.target.x = m.x;
+      p1.target.y = m.y;
+    }
+    else if (dragging==='p2'){ 
+      p2.pos.x = m.x;
+      p2.pos.y = m.y;
+      p2.vel.x = 0;
+      p2.vel.y = 0;
+      p2.target.x = m.x;
+      p2.target.y = m.y;
+    }
+    else if (mouseDown){ 
+      globalTarget.x = m.x;
+      globalTarget.y = m.y;
+      updateTargets(); 
+    }
+  }
+}, {passive:false});
+
+addEventListener('mouseup', ()=>{ mouseDown=false; dragging=null; });
+addEventListener('touchend', ()=>{ mouseDown=false; dragging=null; });
+
+const sampleStep = 0.01;
+const tangentStep = 0.1;
+
+function draw(){
+  if (!p1 || !p2) return;
+  
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.fillRect(0, canvasHeight/2 + 180, canvasWidth, 2);
+
+// drawing the curve by sampling
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = '#55c7ff';
+  ctx.shadowBlur = 8;
+  ctx.shadowColor = '#55c7ff';
+  ctx.beginPath();
+  for(let t=0; t<=1; t+=sampleStep){
+    const p = bezierPoint(p0, p1.pos, p2.pos, p3, t);
+    if (t === 0) ctx.moveTo(p.x,p.y); 
+    else ctx.lineTo(p.x,p.y);
+  }
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+// drawing tangents at intervals which enhanced visibility
+  ctx.shadowBlur = 0;
+  for(let t=0; t<=1; t+=tangentStep){
+    const p = bezierPoint(p0, p1.pos, p2.pos, p3, t);
+    const tan = bezierTangent(p0, p1.pos, p2.pos, p3, t);
+    const tanLen = vLen(tan);
+    
+// Handling zero-length tangent
+    if (tanLen > 0.001){
+      const n = vNorm(tan);
+      const len = 40;
+      const a = vAdd(p, vScale(n,-len/2));
+      const b = vAdd(p, vScale(n,len/2));
+      
+// drawing tangent line with bright color
+      ctx.strokeStyle = '#ffeb3b';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      ctx.stroke();
+      
+// drawing small circle at tangent point
+      ctx.fillStyle = 'rgba(255,235,59,0.6)';
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3, 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+// drawing control polygon (dashed)
+  ctx.setLineDash([6,8]);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath();
+  ctx.moveTo(p0.x,p0.y);
+  ctx.lineTo(p1.pos.x,p1.pos.y);
+  ctx.lineTo(p2.pos.x,p2.pos.y);
+  ctx.lineTo(p3.x,p3.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+// drawing control points
+  function drawPoint(p, colorFill, colorStroke){
+    ctx.beginPath();
+    ctx.fillStyle = colorFill;
+    ctx.strokeStyle = colorStroke;
+    ctx.lineWidth = 2;
+    ctx.arc(p.x,p.y,8,0,Math.PI*2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  drawPoint(p0, '#ffffff', '#b2e6ff');
+  drawPoint(p3, '#ffffff', '#b2e6ff');
+  drawPoint(p1.pos, '#ffd1d1', '#ff7f7f');
+  drawPoint(p2.pos, '#d1ffd6', '#7fff9a');
+
+// draing small velocity arrows for p1/p2
+  function drawArrow(base, v, color){
+    const tail = base;
+    const head = vAdd(base, vScale(v, 0.02));
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(tail.x, tail.y);
+    ctx.lineTo(head.x, head.y);
+    ctx.stroke();
+  }
+  drawArrow(p1.pos, p1.vel, 'rgba(255,127,127,0.9)');
+  drawArrow(p2.pos, p2.vel, 'rgba(127,255,159,0.9)');
+}
+
+let last = performance.now();
+
+function frame(time){
+  const maxStep = 1/30;
+  let dt = (time - last)/1000;
+  dt = Math.min(dt,maxStep);
+  last = time;
+
+//ensuring control points are initialized or not
+  if (!p1 || !p2) return;
+  
+  updateTargets();
+  
+// slowly ease target toward center baseline
+  if (!mouseDown && !dragging){
+    const center = {x: (p0.x+p3.x)/2, y: canvasHeight*0.5 + 30};
+    const easeSpeed = 0.02;
+    globalTarget.x += (center.x - globalTarget.x) * easeSpeed;
+    globalTarget.y += (center.y - globalTarget.y) * easeSpeed;
+  }
+//updating physics of dynamic control
+  p1.update(dt);
+  p2.update(dt);
+
+  draw();
+  requestAnimationFrame(frame);
+}
+
+//initializing scene and starting animation
+updateFixedPoints();
+initializeControlPoints();
+initializeGlobalTarget();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
+
